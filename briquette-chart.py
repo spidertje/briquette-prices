@@ -7,6 +7,7 @@ Uses Pillow for PNG chart generation. Always uses absolute paths.
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -27,20 +28,94 @@ HEADERS = {
 }
 
 
-def load_prices():
-    """Load existing price history from JSON. Very robust."""
-    if not os.path.exists(PRICE_FILE):
-        return []
+GITHUB_REPO = "https://github.com/spidertje/briquette-prices.git"
+GITHUB_CACHE = os.path.join(DATA_DIR, ".github_cache")
+MIN_HISTORY_POINTS = 3  # If local has fewer, try GitHub restore
+
+
+def load_prices_from_github():
+    """Fetch price data from GitHub repo and return it."""
+    if not os.path.exists(GITHUB_CACHE):
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth=50", GITHUB_REPO, GITHUB_CACHE],
+                capture_output=True, timeout=30, check=True,
+            )
+        except Exception as e:
+            print(f"WARNING: GitHub clone failed ({e}), skipping restore", file=sys.stderr)
+            return None
+    else:
+        try:
+            subprocess.run(
+                ["git", "-C", GITHUB_CACHE, "pull", "--ff-only"],
+                capture_output=True, timeout=30, check=True,
+            )
+        except Exception as e:
+            print(f"WARNING: GitHub pull failed ({e}), using cached", file=sys.stderr)
+
+    gh_file = os.path.join(GITHUB_CACHE, "briquette_prices.json")
     try:
-        with open(PRICE_FILE, "r") as f:
+        with open(gh_file, "r") as f:
             data = json.load(f)
         if not isinstance(data, list):
-            print("WARNING: price file was not a list, resetting.", file=sys.stderr)
-            return []
+            print("WARNING: GitHub data was not a list", file=sys.stderr)
+            return None
         return data
     except (json.JSONDecodeError, OSError) as e:
+        print(f"WARNING: GitHub data corrupt ({e})", file=sys.stderr)
+        return None
+
+
+def merge_local_with_github(local, github):
+    """Merge: start with GitHub, add any local entries not in GitHub."""
+    if not github:
+        return local
+    merged = list(github)
+    for entry in local:
+        if not any(str(e.get("date", "")).strip() == str(entry.get("date", "")).strip() for e in merged):
+            merged.append(entry)
+    return merged
+
+
+def load_prices():
+    """Load existing price history from JSON. Very robust.
+    If local data is missing or suspiciously small, tries GitHub restore."""
+    local_data = None
+    try:
+        if os.path.exists(PRICE_FILE):
+            with open(PRICE_FILE, "r") as f:
+                local_data = json.load(f)
+            if not isinstance(local_data, list):
+                print("WARNING: price file was not a list, resetting.", file=sys.stderr)
+                local_data = None
+        else:
+            print("WARNING: price file does not exist.", file=sys.stderr)
+    except (json.JSONDecodeError, OSError) as e:
         print(f"WARNING: failed to load price file ({e}), resetting.", file=sys.stderr)
-        return []
+        local_data = None
+
+    # If local data is empty, missing, or suspiciously small, try GitHub
+    if (local_data is None or len(local_data) < MIN_HISTORY_POINTS):
+        if len(local_data or []) < MIN_HISTORY_POINTS:
+            print(
+                f"WARNING: local data has {len(local_data or [])} points (<{MIN_HISTORY_POINTS}), "
+                f"attempting GitHub restore...",
+                file=sys.stderr,
+            )
+            github_data = load_prices_from_github()
+            if github_data:
+                merged = merge_local_with_github(local_data or [], github_data)
+                if len(merged) > len(local_data or []):
+                    print(
+                        f"RESTORED: {len(merged)} points from GitHub "
+                        f"(was {len(local_data or [])})",
+                        file=sys.stderr,
+                    )
+                    # Save the merged data
+                    save_prices(merged)
+                    return merged
+
+    return local_data or []
 
 
 def save_prices(prices):
