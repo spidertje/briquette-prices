@@ -1,2 +1,7 @@
 .github_token
+<<<<<<< HEAD
 data/briquette_chart.png
+=======
+*.pyc
+__pycache__/
+>>>>>>> 553420f7b8c27856e26f543572a54399f0891b0d
